@@ -1,0 +1,113 @@
+name: Build SARVA-SHIELD Android APK
+
+on:
+  push:
+    branches: [ "*" ]
+  workflow_dispatch:
+
+jobs:
+  build-android-apk:
+    name: Compile Release APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Set up Flutter Stable
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Locate Project Root & Fetch Packages
+        run: |
+          PUBSPEC_FILE=$(find . -maxdepth 3 -name "pubspec.yaml" | head -n 1)
+          if [ -z "$PUBSPEC_FILE" ]; then
+            echo "Error: pubspec.yaml not found!"
+            exit 1
+          fi
+          PROJECT_DIR=$(dirname "$PUBSPEC_FILE")
+          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+          cd "$PROJECT_DIR"
+
+          rm -f pubspec.lock android/local.properties .flutter-plugins-dependencies
+          sed -i 's/\r$//' android/gradlew
+          chmod +x android/gradlew
+          flutter pub get
+
+      - name: ULTRA KILL: Force All minSdk 21 to 23 Globally via Python
+        run: |
+          python3 - << 'EOF'
+          import os, re
+
+          # Repo ke andar ki sabhi files mein 21 ko 23 kar do
+          for root, dirs, files in os.walk("."):
+              for file in files:
+                  if file.endswith((".xml", ".kts", ".gradle", ".properties")):
+                      path = os.path.join(root, file)
+                      try:
+                          with open(path, "r", encoding="utf-8") as f:
+                              content = f.read()
+                          
+                          # Sabhi possible minSdk patterns ko 23 mein badlo
+                          new_content = content
+                          new_content = re.sub(r'minSdk\s*=\s*21', 'minSdk = 23', new_content)
+                          new_content = re.sub(r'minSdkVersion\s+21', 'minSdkVersion 23', new_content)
+                          new_content = re.sub(r'minSdk\s*=\s*flutter\.minSdkVersion', 'minSdk = 23', new_content)
+                          new_content = re.sub(r'minSdkVersion\s+flutter\.minSdkVersion', 'minSdkVersion 23', new_content)
+                          new_content = re.sub(r'android:minSdkVersion="21"', 'android:minSdkVersion="23"', new_content)
+                          new_content = re.sub(r'<uses-sdk[^>]*>', '<uses-sdk android:minSdkVersion="23" tools:overrideLibrary="androidx.datastore.preferences, androidx.datastore.preferences.core, androidx.datastore.core"/>', new_content)
+
+                          if content != new_content:
+                              with open(path, "w", encoding="utf-8") as f:
+                                  f.write(new_content)
+                              print(f"Successfully upgraded minSdk to 23 in: {path}")
+                      except Exception as e:
+                          pass
+          EOF
+
+      - name: Patch flutter_bluetooth_serial Namespace
+        run: |
+          python3 - << 'PYEOF'
+          import os, glob, re
+          pub_cache = os.path.expanduser("~/.pub-cache")
+
+          for bg in glob.glob(f"{pub_cache}/**/flutter_bluetooth_serial*/android/build.gradle", recursive=True):
+              with open(bg, "r", encoding="utf-8") as f:
+                  txt = f.read()
+              if "namespace" not in txt:
+                  txt = txt.replace("android {", "android {\n    namespace 'io.github.edufolly.flutterbluetoothserial'")
+              txt = re.sub(r'compileSdkVersion\s+[0-9]+', 'compileSdkVersion 34', txt)
+              txt = re.sub(r'minSdkVersion\s+[0-9]+', 'minSdkVersion 23', txt)
+              with open(bg, "w", encoding="utf-8") as f:
+                  f.write(txt)
+              print("Patched build.gradle:", bg)
+
+          for mf in glob.glob(f"{pub_cache}/**/flutter_bluetooth_serial*/android/src/main/AndroidManifest.xml", recursive=True):
+              with open(mf, "r", encoding="utf-8") as f:
+                  mtxt = f.read()
+              mtxt = re.sub(r'\s*package\s*=\s*["\'][^"\']+["\']', '', mtxt)
+              with open(mf, "w", encoding="utf-8") as f:
+                  f.write(mtxt)
+              print("Cleaned package attribute in:", mf)
+          PYEOF
+
+      - name: Build Release APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: flutter build apk --release --no-tree-shake-icons --android-skip-build-dependency-validation
+
+      - name: Upload SARVA-SHIELD Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SARVA-SHIELD-v5-Release-APK
+          path: ${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
