@@ -1,1 +1,74 @@
+name: Build SARVA-SHIELD Android APK
 
+on:
+  push:
+    branches: [ "*" ]
+  workflow_dispatch:
+
+jobs:
+  build-android-apk:
+    name: Compile Release APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Set up Flutter Stable
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Configure Project & Fix MinSdk 23
+        run: |
+          # 1. Project Directory dhoondho
+          PUBSPEC_FILE=$(find . -maxdepth 3 -name "pubspec.yaml" | head -n 1)
+          PROJECT_DIR=$(dirname "$PUBSPEC_FILE")
+          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+          cd "$PROJECT_DIR"
+
+          # 2. Clean temporary files
+          rm -f pubspec.lock android/local.properties .flutter-plugins-dependencies
+          sed -i 's/\r$//' android/gradlew
+          chmod +x android/gradlew
+
+          # 3. Har jagah minSdkVersion ko 21 se 23 karo (App + Manifest)
+          find android -type f \( -name "build.gradle*" -o -name "AndroidManifest.xml" \) | while read -r f; do
+            sed -i 's/minSdk = [0-9]*/minSdk = 23/g' "$f"
+            sed -i 's/minSdkVersion [0-9]*/minSdkVersion 23/g' "$f"
+            sed -i 's/flutter.minSdkVersion/23/g' "$f"
+            sed -i 's/android:minSdkVersion="[0-9]*"/android:minSdkVersion="23"/g' "$f"
+          done
+          echo "flutter.minSdkVersion=23" >> android/local.properties
+
+          # 4. Packages fetch karo
+          flutter pub get
+
+      - name: Patch flutter_bluetooth_serial Namespace
+        run: |
+          find "$HOME/.pub-cache" -name "build.gradle" 2>/dev/null | grep "flutter_bluetooth_serial" | while read -r file; do
+            if ! grep -q "namespace" "$file"; then
+              sed -i "/android {/a \    namespace 'io.github.edufolly.flutterbluetoothserial'" "$file"
+            fi
+            sed -i "s/compileSdkVersion .*/compileSdkVersion 34/g" "$file"
+          done
+
+      - name: Build Release APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: flutter build apk --release --no-tree-shake-icons --android-skip-build-dependency-validation
+
+      - name: Upload SARVA-SHIELD Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SARVA-SHIELD-v5-Release-APK
+          path: ${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
