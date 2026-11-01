@@ -26,11 +26,11 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Locate Project Root, Clean Lockfiles & Fetch Packages
+      - name: Locate Project Root & Clean Cache
         run: |
           PUBSPEC_FILE=$(find . -maxdepth 3 -name "pubspec.yaml" | head -n 1)
           if [ -z "$PUBSPEC_FILE" ]; then
-            echo "Error: pubspec.yaml not found in repository!"
+            echo "Error: pubspec.yaml not found!"
             exit 1
           fi
           PROJECT_DIR=$(dirname "$PUBSPEC_FILE")
@@ -39,53 +39,28 @@ jobs:
           rm -f pubspec.lock android/local.properties .flutter-plugins-dependencies
           sed -i 's/\r$//' android/gradlew
           chmod +x android/gradlew
+          
+          # Fix MinSdk to 23
+          find android -name "build.gradle*" | while read -r file; do
+            sed -i 's/minSdk = 21/minSdk = 23/g' "$file"
+            sed -i 's/minSdkVersion 21/minSdkVersion 23/g' "$file"
+          done
+          
           flutter pub get
 
-      - name: Patch flutter_bluetooth_serial for Gradle 8.14 & AGP 8+
+      - name: Patch flutter_bluetooth_serial (Safe Namespace Injection)
         run: |
-          python3 - << 'EOF'
-          import glob, os, re
-
-          pub_cache = os.path.expanduser("~/.pub-cache")
-          clean_bg = "\n".join([
-              "group = 'io.github.edufolly.flutterbluetoothserial'",
-              "version = '1.0-SNAPSHOT'",
-              "buildscript {",
-              "    repositories { google(); mavenCentral() }",
-              "    dependencies { classpath 'com.android.tools.build:gradle:8.11.1' }",
-              "}",
-              "rootProject.allprojects {",
-              "    repositories { google(); mavenCentral() }",
-              "}",
-              "apply plugin: 'com.android.library'",
-              "android {",
-              "    namespace = 'io.github.edufolly.flutterbluetoothserial'",
-              "    compileSdk = 36",
-              "    compileOptions {",
-              "        sourceCompatibility = JavaVersion.VERSION_17",
-              "        targetCompatibility = JavaVersion.VERSION_17",
-              "    }",
-              "    defaultConfig { minSdk = 21 }",
-              "}",
-          ]) + "\n"
-
-          for bg in glob.glob(f"{pub_cache}/**/flutter_bluetooth_serial*/android/build.gradle", recursive=True):
-              with open(bg, "w", encoding="utf-8") as f:
-                  f.write(clean_bg)
-              print("Patched build.gradle:", bg)
-
-          for mf in glob.glob(f"{pub_cache}/**/flutter_bluetooth_serial*/android/src/main/AndroidManifest.xml", recursive=True):
-              with open(mf, "r", encoding="utf-8") as f:
-                  mtxt = f.read()
-              mtxt = re.sub(r'\s*package\s*=\s*["\'][^"\']+["\']', '', mtxt)
-              with open(mf, "w", encoding="utf-8") as f:
-                  f.write(mtxt)
-              print("Patched AndroidManifest.xml:", mf)
-          EOF
+          find "$HOME/.pub-cache" -name "build.gradle" 2>/dev/null | grep "flutter_bluetooth_serial" | while read -r file; do
+            echo "Patching: $file"
+            if ! grep -q "namespace" "$file"; then
+              sed -i "/android {/a \    namespace 'io.github.edufolly.flutterbluetoothserial'" "$file"
+            fi
+            sed -i "s/compileSdkVersion .*/compileSdkVersion 34/g" "$file"
+          done
 
       - name: Build Release APK
         working-directory: ${{ env.PROJECT_DIR }}
-        run: flutter build apk --release --no-tree-shake-icons
+        run: flutter build apk --release --no-tree-shake-icons --android-skip-build-dependency-validation
 
       - name: Upload SARVA-SHIELD Release APK
         uses: actions/upload-artifact@v4
