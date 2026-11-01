@@ -28,13 +28,9 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Prepare Project & Fetch Packages
+      - name: Hard-Overwrite build.gradle.kts & Fix Bluetooth Plugin
         run: |
           PUBSPEC_FILE=$(find . -maxdepth 3 -name "pubspec.yaml" | head -n 1)
-          if [ -z "$PUBSPEC_FILE" ]; then
-            echo "Error: pubspec.yaml not found!"
-            exit 1
-          fi
           PROJECT_DIR=$(dirname "$PUBSPEC_FILE")
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
           cd "$PROJECT_DIR"
@@ -42,52 +38,82 @@ jobs:
           rm -f pubspec.lock android/local.properties .flutter-plugins-dependencies
           sed -i 's/\r$//' android/gradlew
           chmod +x android/gradlew
+
+          # 1. AndroidManifest.xml se uses-sdk tag hatao taaki conflict na ho
+          sed -i '/<uses-sdk/d' android/app/src/main/AndroidManifest.xml
+
+          # 2. android/app/build.gradle.kts ko seedha minSdk = 23 ke saath pura overwrite karo
+          rm -f android/app/build.gradle android/app/build.gradle.kts
+          cat << 'EOF' > android/app/build.gradle.kts
+          plugins {
+              id("com.android.application")
+              id("kotlin-android")
+              id("dev.flutter.flutter-gradle-plugin")
+          }
+
+          android {
+              namespace = "com.example.sarva_shield_app"
+              compileSdk = 35
+              ndkVersion = flutter.ndkVersion
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+
+              defaultConfig {
+                  applicationId = "com.example.sarva_shield_app"
+                  minSdk = 23
+                  targetSdk = 35
+                  versionCode = 1
+                  versionName = "1.0.0"
+              }
+
+              buildTypes {
+                  release {
+                      signingConfig = signingConfigs.getByName("debug")
+                      isMinifyEnabled = false
+                      isShrinkResources = false
+                  }
+              }
+          }
+
+          flutter {
+              source = "../.."
+          }
+          EOF
+
+          # 3. Packages download karo
           flutter pub get
 
-      - name: Permanent Fix for MinSdk 23, Manifest Merger & Bluetooth Serial
-        run: |
-          python3 - << 'EOF'
+          # 4. Patch flutter_bluetooth_serial (Namespace + SDK 34 + Remove old package attr)
+          python3 - << 'PYEOF'
           import os, glob, re
-
-          # 1. Force minSdk = 23 in all gradle files
-          for gf in glob.glob("**/build.gradle*", recursive=True):
-              with open(gf, "r", encoding="utf-8") as f:
-                  content = f.read()
-              content = re.sub(r'minSdk\s*=\s*[0-9]+', 'minSdk = 23', content)
-              content = re.sub(r'minSdkVersion\s+[0-9]+', 'minSdkVersion 23', content)
-              content = re.sub(r'minSdk\s*=\s*flutter\.minSdkVersion', 'minSdk = 23', content)
-              content = re.sub(r'minSdkVersion\s+flutter\.minSdkVersion', 'minSdkVersion 23', content)
-              with open(gf, "w", encoding="utf-8") as f:
-                  f.write(content)
-              print("Patched MinSdk in:", gf)
-
-          # 2. Add overrideLibrary and minSdkVersion directly in AndroidManifest.xml
-          for mf in glob.glob("**/src/main/AndroidManifest.xml", recursive=True):
-              with open(mf, "r", encoding="utf-8") as f:
-                  m = f.read()
-              if 'xmlns:tools="http://schemas.android.com/tools"' not in m:
-                  m = m.replace('<manifest ', '<manifest xmlns:tools="http://schemas.android.com/tools" ')
-              override_tag = '<uses-sdk android:minSdkVersion="23" tools:overrideLibrary="androidx.datastore.preferences.core, androidx.datastore.core" />'
-              if '<uses-sdk' in m:
-                  m = re.sub(r'<uses-sdk[^>]*/>', override_tag, m)
-              else:
-                  m = re.sub(r'(<manifest[^>]*>)', r'\1\n    ' + override_tag, m)
-              with open(mf, "w", encoding="utf-8") as f:
-                  f.write(m)
-              print("Patched Manifest with overrideLibrary:", mf)
-
-          # 3. Patch flutter_bluetooth_serial namespace without deleting plugin dependencies
           pub_cache = os.path.expanduser("~/.pub-cache")
+
           for bg in glob.glob(f"{pub_cache}/**/flutter_bluetooth_serial*/android/build.gradle", recursive=True):
               with open(bg, "r", encoding="utf-8") as f:
-                  bgtxt = f.read()
-              if "namespace" not in bgtxt:
-                  bgtxt = bgtxt.replace("android {", "android {\n    namespace 'io.github.edufolly.flutterbluetoothserial'")
-              bgtxt = re.sub(r'compileSdkVersion\s+[0-9]+', 'compileSdkVersion 34', bgtxt)
+                  txt = f.read()
+              if "namespace" not in txt:
+                  txt = txt.replace("android {", "android {\n    namespace 'io.github.edufolly.flutterbluetoothserial'")
+              txt = re.sub(r'compileSdkVersion\s+[0-9]+', 'compileSdkVersion 34', txt)
+              txt = re.sub(r'minSdkVersion\s+[0-9]+', 'minSdkVersion 23', txt)
               with open(bg, "w", encoding="utf-8") as f:
-                  f.write(bgtxt)
-              print("Patched flutter_bluetooth_serial:", bg)
-          EOF
+                  f.write(txt)
+              print("Patched build.gradle:", bg)
+
+          for mf in glob.glob(f"{pub_cache}/**/flutter_bluetooth_serial*/android/src/main/AndroidManifest.xml", recursive=True):
+              with open(mf, "r", encoding="utf-8") as f:
+                  mtxt = f.read()
+              mtxt = re.sub(r'\s*package\s*=\s*["\'][^"\']+["\']', '', mtxt)
+              with open(mf, "w", encoding="utf-8") as f:
+                  f.write(mtxt)
+              print("Cleaned package attribute in:", mf)
+          PYEOF
 
       - name: Build Release APK
         working-directory: ${{ env.PROJECT_DIR }}
